@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS problems (
   difficulty VARCHAR(50) NOT NULL CHECK (difficulty IN ('Easy', 'Medium', 'Hard')),
   category VARCHAR(100),
   tags TEXT[] DEFAULT ARRAY[]::TEXT[],
+  starter_code JSONB DEFAULT '{}'::JSONB,
   acceptance_rate FLOAT DEFAULT 0,
   submissions_count INT DEFAULT 0,
   acceptance_count INT DEFAULT 0,
@@ -38,6 +39,21 @@ CREATE TABLE IF NOT EXISTS problems (
 CREATE INDEX idx_problems_difficulty ON problems(difficulty);
 CREATE INDEX idx_problems_category ON problems(category);
 CREATE INDEX idx_problems_slug ON problems(slug);
+
+-- Test cases table
+CREATE TABLE IF NOT EXISTS test_cases (
+  id BIGSERIAL PRIMARY KEY,
+  problem_id BIGINT NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
+  input TEXT NOT NULL,
+  expected_output TEXT NOT NULL,
+  explanation TEXT,
+  is_sample BOOLEAN DEFAULT false,
+  sort_order INT DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_test_cases_problem_id ON test_cases(problem_id);
+CREATE INDEX idx_test_cases_problem_sample ON test_cases(problem_id, is_sample);
 
 -- Submissions table (user code submissions)
 CREATE TABLE IF NOT EXISTS submissions (
@@ -82,68 +98,3 @@ CREATE TABLE IF NOT EXISTS user_progress (
 CREATE INDEX idx_user_progress_user_id ON user_progress(user_id);
 
 -- Solved problems tracking
-CREATE TABLE IF NOT EXISTS solved_problems (
-  id BIGSERIAL PRIMARY KEY,
-  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  problem_id BIGINT NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
-  solved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  solution_code TEXT,
-  best_execution_time INT,
-  best_memory_used INT,
-  UNIQUE(user_id, problem_id)
-);
-
--- Create index
-CREATE INDEX idx_solved_problems_user_id ON solved_problems(user_id);
-CREATE INDEX idx_solved_problems_problem_id ON solved_problems(problem_id);
-
--- Discussion/Comments table
-CREATE TABLE IF NOT EXISTS discussions (
-  id BIGSERIAL PRIMARY KEY,
-  problem_id BIGINT NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
-  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  title VARCHAR(255) NOT NULL,
-  content TEXT NOT NULL,
-  upvotes INT DEFAULT 0,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create indexes
-CREATE INDEX idx_discussions_problem_id ON discussions(problem_id);
-CREATE INDEX idx_discussions_user_id ON discussions(user_id);
-
--- Leaderboard view (materialized view for better performance)
-CREATE OR REPLACE VIEW leaderboard AS
-SELECT 
-  up.user_id,
-  u.username,
-  up.problems_solved,
-  up.submission_count,
-  up.current_streak,
-  ROW_NUMBER() OVER (ORDER BY up.problems_solved DESC, up.submission_count ASC) as rank
-FROM user_progress up
-JOIN users u ON up.user_id = u.id
-WHERE u.is_active = true
-ORDER BY up.problems_solved DESC;
-
--- Create triggers for auto-updating timestamps
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = CURRENT_TIMESTAMP;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
-FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE TRIGGER update_problems_updated_at BEFORE UPDATE ON problems
-FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE TRIGGER update_user_progress_updated_at BEFORE UPDATE ON user_progress
-FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE TRIGGER update_discussions_updated_at BEFORE UPDATE ON discussions
-FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

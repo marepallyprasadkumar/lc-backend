@@ -1,36 +1,36 @@
 const supabase = require("../config/supabaseClient");
 
+const buildSlug = (title) =>
+  title
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+
 // GET all problems with filtering and pagination
 const getProblems = async (req, res) => {
   try {
-    const { 
-      difficulty, 
-      category, 
-      search, 
-      page = 1, 
+    const {
+      difficulty,
+      category,
+      search,
+      page = 1,
       limit = 20,
-      sortBy = "id"
+      sortBy = "id",
     } = req.query;
 
     let query = supabase
       .from("problems")
-      .select("id, title, slug, difficulty, acceptance_rate, submissions_count, category, tags", 
-        { count: "exact" });
+      .select(
+        "id, title, slug, difficulty, acceptance_rate, submissions_count, category, tags",
+        { count: "exact" }
+      );
 
-    // Apply filters
-    if (difficulty) {
-      query = query.eq("difficulty", difficulty);
-    }
+    if (difficulty) query = query.eq("difficulty", difficulty);
+    if (category) query = query.eq("category", category);
+    if (search) query = query.ilike("title", `%${search}%`);
 
-    if (category) {
-      query = query.eq("category", category);
-    }
-
-    if (search) {
-      query = query.ilike("title", `%${search}%`);
-    }
-
-    // Apply sorting
     switch (sortBy) {
       case "difficulty":
         query = query.order("difficulty");
@@ -45,22 +45,23 @@ const getProblems = async (req, res) => {
         query = query.order("id");
     }
 
-    // Apply pagination
-    const offset = (page - 1) * limit;
-    query = query.range(offset, offset + limit - 1);
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const offset = (pageNum - 1) * limitNum;
+
+    query = query.range(offset, offset + limitNum - 1);
 
     const { data, error, count } = await query;
-
     if (error) throw error;
 
     res.json({
       data,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count,
-        totalPages: Math.ceil(count / limit)
-      }
+        page: pageNum,
+        limit: limitNum,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / limitNum),
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -85,7 +86,6 @@ const getProblemBySlug = async (req, res) => {
 
     let userProgress = null;
 
-    // If user is logged in, get their progress on this problem
     if (userId) {
       const { data: solved } = await supabase
         .from("solved_problems")
@@ -106,13 +106,13 @@ const getProblemBySlug = async (req, res) => {
         submissions: submissions ? submissions.length : 0,
         solvedAt: solved?.solved_at || null,
         bestTime: solved?.best_execution_time || null,
-        bestMemory: solved?.best_memory_used || null
+        bestMemory: solved?.best_memory_used || null,
       };
     }
 
     res.json({
       problem,
-      userProgress
+      userProgress,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -140,44 +140,47 @@ const getProblemById = async (req, res) => {
   }
 };
 
-// CREATE problem (admin only)
+// CREATE problem
 const createProblem = async (req, res) => {
   try {
-    const { 
-      title, 
-      description, 
-      difficulty, 
+    const {
+      title,
+      description,
+      difficulty,
       category,
-      tags, 
+      tags,
       examples,
       constraints,
-      solution_link
+      solution_link,
+      starter_code,
     } = req.body;
 
-    // Validation
     if (!title || !description || !difficulty) {
-      return res.status(400).json({ 
-        message: "Title, description, and difficulty are required" 
+      return res.status(400).json({
+        message: "Title, description, and difficulty are required",
       });
     }
 
-    const slug = title.toLowerCase().replace(/\s+/g, "-");
+    const slug = buildSlug(title);
 
     const { data: problem, error } = await supabase
       .from("problems")
-      .insert([{
-        title,
-        slug,
-        description,
-        difficulty,
-        category: category || "Other",
-        tags: tags || [],
-        examples: examples || [],
-        constraints,
-        solution_link,
-        submissions_count: 0,
-        acceptance_count: 0
-      }])
+      .insert([
+        {
+          title,
+          slug,
+          description,
+          difficulty,
+          category: category || "Other",
+          tags: tags || [],
+          examples: examples || [],
+          constraints,
+          solution_link,
+          starter_code: starter_code || {},
+          submissions_count: 0,
+          acceptance_count: 0,
+        },
+      ])
       .select()
       .single();
 
@@ -189,7 +192,7 @@ const createProblem = async (req, res) => {
   }
 };
 
-// UPDATE problem (admin only)
+// UPDATE problem
 const updateProblem = async (req, res) => {
   try {
     const { id } = req.params;
@@ -210,16 +213,12 @@ const updateProblem = async (req, res) => {
   }
 };
 
-// DELETE problem (admin only)
+// DELETE problem
 const deleteProblem = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { error } = await supabase
-      .from("problems")
-      .delete()
-      .eq("id", id);
-
+    const { error } = await supabase.from("problems").delete().eq("id", id);
     if (error) throw error;
 
     res.json({ message: "Problem deleted successfully" });
@@ -231,30 +230,43 @@ const deleteProblem = async (req, res) => {
 // GET problem statistics
 const getProblemStats = async (req, res) => {
   try {
-    const { data: stats } = await supabase
+    const { data: problems, error } = await supabase
       .from("problems")
-      .select("difficulty, COUNT(*) as count", { count: "exact" })
-      .group_by("difficulty");
+      .select("difficulty, submissions_count");
 
-    const { data: totalSubmissions } = await supabase
-      .rpc("get_total_submissions");
+    if (error) throw error;
+
+    const statsMap = { Easy: 0, Medium: 0, Hard: 0 };
+    let totalSubmissions = 0;
+
+    for (const problem of problems || []) {
+      if (statsMap[problem.difficulty] !== undefined) {
+        statsMap[problem.difficulty] += 1;
+      }
+      totalSubmissions += problem.submissions_count || 0;
+    }
+
+    const stats = Object.entries(statsMap).map(([difficulty, count]) => ({
+      difficulty,
+      count,
+    }));
 
     res.json({
-      totalProblems: stats.reduce((sum, s) => sum + s.count, 0),
+      totalProblems: problems?.length || 0,
       byDifficulty: stats,
-      totalSubmissions
+      totalSubmissions,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 };
 
-module.exports = { 
-  getProblems, 
+module.exports = {
+  getProblems,
   getProblemBySlug,
   getProblemById,
   createProblem,
   updateProblem,
   deleteProblem,
-  getProblemStats
+  getProblemStats,
 };
