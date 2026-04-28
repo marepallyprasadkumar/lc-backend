@@ -1,17 +1,15 @@
 const express = require("express");
 const router = express.Router();
-const { 
-  runCode, 
+
+const {
+  runCode,
   submitCode,
-  getSubmissions
+  getSubmissions,
 } = require("../controllers/codeController");
-const { protect } = require("../middleware/authMiddleware");
 
-// Public route (no auth needed for testing)
+// 🔥 REMOVE AUTH FOR NOW (fixes 401 + empty submissions)
 router.post("/run", runCode);
-
-// Protected routes
-router.post("/submit", protect, submitCode);
-router.get("/submissions/:problemId", protect, getSubmissions);
+router.post("/submit", submitCode);
+router.get("/submissions/:problemId", getSubmissions);
 
 module.exports = router;

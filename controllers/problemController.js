@@ -1,266 +1,189 @@
 const supabase = require("../config/supabaseClient");
 
-const buildSlug = (title) =>
-  title
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
-
-// GET all problems with filtering and pagination
+/* ================= GET ALL PROBLEMS ================= */
 const getProblems = async (req, res) => {
   try {
-    const {
-      difficulty,
-      category,
-      search,
-      page = 1,
-      limit = 20,
-      sortBy = "id",
-    } = req.query;
+    console.log("API HIT: /api/problems"); // 🔥 DEBUG
 
-    let query = supabase
+    const { data, error } = await supabase
       .from("problems")
-      .select(
-        "id, title, slug, difficulty, acceptance_rate, submissions_count, category, tags",
-        { count: "exact" }
-      );
+      .select("*");
 
-    if (difficulty) query = query.eq("difficulty", difficulty);
-    if (category) query = query.eq("category", category);
-    if (search) query = query.ilike("title", `%${search}%`);
-
-    switch (sortBy) {
-      case "difficulty":
-        query = query.order("difficulty");
-        break;
-      case "acceptance":
-        query = query.order("acceptance_rate", { ascending: false });
-        break;
-      case "recent":
-        query = query.order("created_at", { ascending: false });
-        break;
-      default:
-        query = query.order("id");
+    if (error) {
+      console.error("Supabase error:", error);
+      throw error;
     }
 
-    const pageNum = parseInt(page, 10);
-    const limitNum = parseInt(limit, 10);
-    const offset = (pageNum - 1) * limitNum;
+    console.log("DATA:", data); // 🔥 DEBUG
 
-    query = query.range(offset, offset + limitNum - 1);
-
-    const { data, error, count } = await query;
-    if (error) throw error;
-
-    res.json({
-      data,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / limitNum),
-      },
-    });
+    res.json({ data: data || [] });
   } catch (err) {
+    console.error("ERROR:", err);
     res.status(500).json({ error: err.message });
   }
 };
 
-// GET single problem by slug with user progress
+/* ================= GET PROBLEM BY SLUG ================= */
 const getProblemBySlug = async (req, res) => {
-  try {
-    const { slug } = req.params;
-    const userId = req.user?.id;
+  const { slug } = req.params;
 
-    const { data: problem, error } = await supabase
+  try {
+    const { data, error } = await supabase
       .from("problems")
       .select("*")
       .eq("slug", slug)
       .single();
 
-    if (error || !problem) {
-      return res.status(404).json({ message: "Problem not found" });
-    }
+    if (error) throw error;
 
-    let userProgress = null;
-
-    if (userId) {
-      const { data: solved } = await supabase
-        .from("solved_problems")
-        .select("*")
-        .eq("user_id", userId)
-        .eq("problem_id", problem.id)
-        .single();
-
-      const { data: submissions } = await supabase
-        .from("submissions")
-        .select("id, status, submitted_at")
-        .eq("user_id", userId)
-        .eq("problem_id", problem.id)
-        .order("submitted_at", { ascending: false });
-
-      userProgress = {
-        isSolved: !!solved,
-        submissions: submissions ? submissions.length : 0,
-        solvedAt: solved?.solved_at || null,
-        bestTime: solved?.best_execution_time || null,
-        bestMemory: solved?.best_memory_used || null,
-      };
-    }
-
-    res.json({
-      problem,
-      userProgress,
-    });
+    res.json(data);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(404).json({ error: "Problem not found" });
   }
 };
 
-// GET problem by ID
+/* ================= GET PROBLEM BY ID ================= */
 const getProblemById = async (req, res) => {
-  try {
-    const { id } = req.params;
+  const { id } = req.params;
 
-    const { data: problem, error } = await supabase
+  try {
+    const { data, error } = await supabase
       .from("problems")
       .select("*")
       .eq("id", id)
       .single();
 
-    if (error || !problem) {
-      return res.status(404).json({ message: "Problem not found" });
-    }
+    if (error) throw error;
 
-    res.json(problem);
+    res.json(data);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(404).json({ error: "Problem not found" });
   }
 };
 
-// CREATE problem
+/* ================= CREATE PROBLEM ================= */
 const createProblem = async (req, res) => {
   try {
-    const {
-      title,
-      description,
-      difficulty,
-      category,
-      tags,
-      examples,
-      constraints,
-      solution_link,
-      starter_code,
-    } = req.body;
-
-    if (!title || !description || !difficulty) {
-      return res.status(400).json({
-        message: "Title, description, and difficulty are required",
-      });
-    }
-
-    const slug = buildSlug(title);
-
-    const { data: problem, error } = await supabase
+    const { data, error } = await supabase
       .from("problems")
-      .insert([
-        {
-          title,
-          slug,
-          description,
-          difficulty,
-          category: category || "Other",
-          tags: tags || [],
-          examples: examples || [],
-          constraints,
-          solution_link,
-          starter_code: starter_code || {},
-          submissions_count: 0,
-          acceptance_count: 0,
-        },
-      ])
+      .insert([req.body])
       .select()
       .single();
 
     if (error) throw error;
 
-    res.status(201).json(problem);
+    res.status(201).json(data);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 };
 
-// UPDATE problem
+/* ================= UPDATE PROBLEM ================= */
 const updateProblem = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updateData = req.body;
+  const { id } = req.params;
 
-    const { data: problem, error } = await supabase
+  try {
+    const { data, error } = await supabase
       .from("problems")
-      .update(updateData)
+      .update(req.body)
       .eq("id", id)
       .select()
       .single();
 
     if (error) throw error;
 
-    res.json(problem);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-};
-
-// DELETE problem
-const deleteProblem = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const { error } = await supabase.from("problems").delete().eq("id", id);
-    if (error) throw error;
-
-    res.json({ message: "Problem deleted successfully" });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-};
-
-// GET problem statistics
-const getProblemStats = async (req, res) => {
-  try {
-    const { data: problems, error } = await supabase
-      .from("problems")
-      .select("difficulty, submissions_count");
-
-    if (error) throw error;
-
-    const statsMap = { Easy: 0, Medium: 0, Hard: 0 };
-    let totalSubmissions = 0;
-
-    for (const problem of problems || []) {
-      if (statsMap[problem.difficulty] !== undefined) {
-        statsMap[problem.difficulty] += 1;
-      }
-      totalSubmissions += problem.submissions_count || 0;
-    }
-
-    const stats = Object.entries(statsMap).map(([difficulty, count]) => ({
-      difficulty,
-      count,
-    }));
-
-    res.json({
-      totalProblems: problems?.length || 0,
-      byDifficulty: stats,
-      totalSubmissions,
-    });
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 };
 
+/* ================= DELETE PROBLEM ================= */
+const deleteProblem = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { error } = await supabase
+      .from("problems")
+      .delete()
+      .eq("id", id);
+
+    if (error) throw error;
+
+    res.json({ message: "Deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/* ================= PROBLEM STATS ================= */
+const getProblemStats = async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("problems")
+      .select("difficulty");
+
+    if (error) throw error;
+
+    const stats = {
+      total: data.length,
+      easy: data.filter((p) => p.difficulty === "Easy").length,
+      medium: data.filter((p) => p.difficulty === "Medium").length,
+      hard: data.filter((p) => p.difficulty === "Hard").length,
+    };
+
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/* ================= GET PROBLEMS WITH STATUS ================= */
+const getProblemsWithStatus = async (req, res) => {
+  const userId = req.user?.id || 1;
+
+  try {
+    // 1. Get problems
+    const { data: problems, error: probError } = await supabase
+      .from("problems")
+      .select("*");
+
+    if (probError) throw probError;
+
+    // 2. Get submissions
+    const { data: submissions, error: subError } = await supabase
+      .from("submissions")
+      .select("problem_id, status")
+      .eq("user_id", userId);
+
+    if (subError) throw subError;
+
+    // 3. Build status map
+    const statusMap = {};
+
+    (submissions || []).forEach((s) => {
+      if (!statusMap[s.problem_id]) {
+        statusMap[s.problem_id] = "attempted";
+      }
+
+      if (s.status === "Accepted") {
+        statusMap[s.problem_id] = "solved";
+      }
+    });
+
+    // 4. Attach status
+    const enriched = (problems || []).map((p) => ({
+      ...p,
+      status: statusMap[p.id] || "unsolved",
+    }));
+
+    res.json({ data: enriched });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/* ================= EXPORTS ================= */
 module.exports = {
   getProblems,
   getProblemBySlug,
@@ -269,4 +192,5 @@ module.exports = {
   updateProblem,
   deleteProblem,
   getProblemStats,
+  getProblemsWithStatus,
 };

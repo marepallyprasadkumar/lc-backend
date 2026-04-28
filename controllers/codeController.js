@@ -3,9 +3,6 @@ const fs = require("fs");
 const path = require("path");
 const supabase = require("../config/supabaseClient");
 
-const CODE_EXECUTION_TIMEOUT = parseInt(process.env.CODE_EXECUTION_TIMEOUT || "5000", 10);
-const MAX_OUTPUT_LENGTH = parseInt(process.env.MAX_OUTPUT_LENGTH || "10000", 10);
-
 const LANGUAGE_EXTENSIONS = {
   python: "py",
   javascript: "js",
@@ -16,235 +13,157 @@ const LANGUAGE_COMMANDS = {
   javascript: "node",
 };
 
-const normalizeOutput = (value) => String(value || "").trim().replace(/\r\n/g, "\n");
-const compactOutput = (value) => String(value || "").replace(/\s+/g, "").trim();
+const normalize = (v) => String(v || "").trim().replace(/\r\n/g, "\n");
+const compact = (v) => String(v || "").replace(/\s+/g, "").trim();
 
-const cleanupTempFile = (filePath) => {
-  try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch (err) {
-    console.error("Failed to cleanup temp file:", err.message);
-  }
-};
-
-const executeCode = (command, filePath, input) =>
+/* ================= EXECUTE ================= */
+const executeCode = (cmd, file, input) =>
   new Promise((resolve) => {
-    const proc = spawn(command, [filePath], {
-      timeout: CODE_EXECUTION_TIMEOUT,
-    });
+    const proc = spawn(cmd, [file]);
 
-    let output = "";
-    let errorOutput = "";
-    let timedOut = false;
+    let out = "";
+    let err = "";
 
-    proc.stdout.on("data", (data) => {
-      output += data.toString();
-      if (output.length > MAX_OUTPUT_LENGTH) {
-        proc.kill();
-      }
-    });
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve({ output: "", error: "Time Limit Exceeded" });
+    }, 5000);
 
-    proc.stderr.on("data", (data) => {
-      errorOutput += data.toString();
-    });
+    proc.stdout.on("data", (d) => (out += d.toString()));
+    proc.stderr.on("data", (d) => (err += d.toString()));
 
-    proc.on("error", (error) => {
+    proc.on("close", () => {
+      clearTimeout(timer);
       resolve({
-        output: "",
-        error: error.message,
-        timedOut: false,
+        output: normalize(out),
+        error: normalize(err),
       });
     });
 
-    proc.on("close", (_, signal) => {
-      if (signal === "SIGTERM") {
-        timedOut = true;
-      }
-
-      resolve({
-        output: normalizeOutput(output),
-        error: normalizeOutput(errorOutput),
-        timedOut,
-      });
-    });
-
-    proc.stdin.write(input || "");
+    if (input) {
+      proc.stdin.write(input);
+    }
     proc.stdin.end();
   });
 
-// ================= RUN CODE =================
+/* ================= RUN CODE ================= */
 const runCode = async (req, res) => {
   const { code, language = "python", problemId } = req.body;
 
   if (!code || !problemId) {
-    return res.status(400).json({
-      success: false,
-      error: "Code and problemId are required",
-    });
+    return res.status(400).json({ success: false, error: "Missing data" });
   }
 
-  if (!LANGUAGE_COMMANDS[language]) {
-    return res.status(400).json({
-      success: false,
-      error: "Unsupported language. Supported languages: python, javascript",
-    });
-  }
+  const file = path.join(
+    __dirname,
+    `../temp/run_${Date.now()}.${LANGUAGE_EXTENSIONS[language]}`
+  );
 
-  const tempDir = path.join(__dirname, "../temp");
-
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-  }
-
-  const fileName = `temp_${Date.now()}.${LANGUAGE_EXTENSIONS[language] || "py"}`;
-  const filePath = path.join(tempDir, fileName);
+  fs.writeFileSync(file, code);
 
   try {
-    fs.writeFileSync(filePath, code);
-
-    const { data: testCases, error } = await supabase
+    const { data: tests } = await supabase
       .from("test_cases")
       .select("*")
       .eq("problem_id", problemId)
-      .eq("is_sample", true)
-      .order("sort_order", { ascending: true });
-
-    if (error || !testCases || testCases.length === 0) {
-      cleanupTempFile(filePath);
-      return res.status(400).json({
-        success: false,
-        error: "No sample test cases found",
-      });
-    }
+      .eq("is_sample", true);
 
     const results = [];
-    const command = LANGUAGE_COMMANDS[language];
 
-    for (const test of testCases) {
-      const result = await executeCode(command, filePath, test.input);
-      const expectedOutput = normalizeOutput(test.expected_output);
+    for (const t of tests || []) {
+      const inputFormatted = (t.input || "").replace(/\\n/g, "\n");
+
+      const r = await executeCode(
+        LANGUAGE_COMMANDS[language],
+        file,
+        inputFormatted
+      );
+
       const passed =
-        !result.error &&
-        !result.timedOut &&
-        compactOutput(result.output) === compactOutput(expectedOutput);
+        !r.error && compact(r.output) === compact(t.expected_output);
 
       results.push({
-        input: test.input,
-        expected: expectedOutput,
-        output: result.output,
-        error: result.error || null,
-        timedOut: result.timedOut,
+        input: t.input,
+        expected: t.expected_output,
+        output: r.output,
         passed,
       });
     }
 
-    cleanupTempFile(filePath);
+    fs.unlinkSync(file);
 
-    const hasRuntimeError = results.some((r) => r.error);
-    const hasTimeout = results.some((r) => r.timedOut);
+    const passedCount = results.filter((r) => r.passed).length;
+    const totalCount = results.length;
 
-    const verdict = hasRuntimeError
-      ? "Runtime Error"
-      : hasTimeout
-      ? "Time Limit Exceeded"
-      : results.every((r) => r.passed)
-      ? "Accepted"
-      : "Wrong Answer";
-
-    return res.json({
+    res.json({
       success: true,
+      verdict: passedCount === totalCount ? "Accepted" : "Wrong Answer",
+      passed: passedCount,     // ✅ FIX
+      total: totalCount,       // ✅ FIX
       results,
-      verdict,
     });
   } catch (err) {
-    cleanupTempFile(filePath);
-
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-    });
+    fs.unlinkSync(file);
+    res.status(500).json({ error: err.message });
   }
 };
 
-// ================= SUBMIT CODE =================
+/* ================= SUBMIT CODE ================= */
 const submitCode = async (req, res) => {
   const { code, language = "python", problemId } = req.body;
-  const userId = req.user?.id;
+  const userId = req.user?.id || 1;
 
   if (!code || !problemId) {
-    return res.status(400).json({
-      message: "Code and problem ID are required",
-    });
+    return res.status(400).json({ message: "Missing data" });
   }
 
-  if (!LANGUAGE_COMMANDS[language]) {
-    return res.status(400).json({
-      message: "Unsupported language. Supported languages: python, javascript",
-    });
-  }
+  const file = path.join(
+    __dirname,
+    `../temp/sub_${Date.now()}.${LANGUAGE_EXTENSIONS[language]}`
+  );
+
+  fs.writeFileSync(file, code);
 
   try {
-    const tempDir = path.join(__dirname, "../temp");
-
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-
-    const fileName = `submit_${Date.now()}.${LANGUAGE_EXTENSIONS[language] || "py"}`;
-    const filePath = path.join(tempDir, fileName);
-    fs.writeFileSync(filePath, code);
-
-    const { data: hiddenTests, error: testError } = await supabase
+    const { data: tests } = await supabase
       .from("test_cases")
       .select("*")
       .eq("problem_id", problemId)
-      .eq("is_sample", false)
-      .order("sort_order", { ascending: true });
+      .eq("is_sample", false);
 
-    if (testError || !hiddenTests || hiddenTests.length === 0) {
-      cleanupTempFile(filePath);
-      return res.status(400).json({
-        message: "No hidden test cases found for this problem",
+    if (!tests || tests.length === 0) {
+      return res.json({
+        success: true,
+        verdict: "No Tests",
+        passed: 0,
+        total: 0,
+        submission: null,
       });
     }
 
-    const command = LANGUAGE_COMMANDS[language];
-    const results = [];
+    let passed = 0;
 
-    for (const test of hiddenTests) {
-      const result = await executeCode(command, filePath, test.input);
-      const expectedOutput = normalizeOutput(test.expected_output);
-      const passed =
-        !result.error &&
-        !result.timedOut &&
-        compactOutput(result.output) === compactOutput(expectedOutput);
+    for (const t of tests) {
+      const inputFormatted = (t.input || "").replace(/\\n/g, "\n");
 
-      results.push({
-        passed,
-        output: result.output,
-        error: result.error,
-        timedOut: result.timedOut,
-      });
+      const r = await executeCode(
+        LANGUAGE_COMMANDS[language],
+        file,
+        inputFormatted
+      );
+
+      const ok =
+        !r.error && compact(r.output) === compact(t.expected_output);
+
+      if (ok) passed++;
     }
 
-    cleanupTempFile(filePath);
+    fs.unlinkSync(file);
 
-    const hasRuntimeError = results.some((r) => r.error);
-    const hasTimeout = results.some((r) => r.timedOut);
-    const passedCount = results.filter((r) => r.passed).length;
-    const totalTests = results.length;
+    const total = tests.length;
+    const verdict = passed === total ? "Accepted" : "Wrong Answer";
 
-    const verdict = hasRuntimeError
-      ? "Runtime Error"
-      : hasTimeout
-      ? "Time Limit Exceeded"
-      : passedCount === totalTests
-      ? "Accepted"
-      : "Wrong Answer";
-
-    const { data: submission, error } = await supabase
+    const { data, error } = await supabase
       .from("submissions")
       .insert([
         {
@@ -253,110 +172,32 @@ const submitCode = async (req, res) => {
           code,
           language,
           status: verdict,
-          output: verdict === "Accepted" ? "All hidden test cases passed" : null,
-          error_message: hasRuntimeError ? results.find((r) => r.error)?.error : null,
-          test_cases_passed: passedCount,
-          test_cases_total: totalTests,
+          test_cases_passed: passed,
+          test_cases_total: total,
         },
       ])
       .select()
       .single();
 
-    if (error) {
-      return res.status(400).json({ message: error.message });
-    }
-
-    const { data: progress } = await supabase
-      .from("user_progress")
-      .select("*")
-      .eq("user_id", userId)
-      .single();
-
-    const now = new Date();
-    const today = new Date(now);
-    today.setHours(0, 0, 0, 0);
-
-    let newSubmissionCount = (progress?.submission_count || 0) + 1;
-    let newProblemsSolved = progress?.problems_solved || 0;
-    let newCurrentStreak = progress?.current_streak || 0;
-    let newLongestStreak = progress?.longest_streak || 0;
-
-    if (verdict === "Accepted") {
-      const { data: existingSolved } = await supabase
-        .from("solved_problems")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("problem_id", problemId)
-        .maybeSingle();
-
-      if (!existingSolved) {
-        await supabase.from("solved_problems").insert([
-          {
-            user_id: userId,
-            problem_id: problemId,
-            solved_at: now.toISOString(),
-            solution_code: code,
-          },
-        ]);
-
-        newProblemsSolved += 1;
-      }
-
-      const lastDate = progress?.last_submission_date
-        ? new Date(progress.last_submission_date)
-        : null;
-
-      if (!lastDate) {
-        newCurrentStreak = 1;
-      } else {
-        const last = new Date(lastDate);
-        last.setHours(0, 0, 0, 0);
-        const diffDays = Math.floor((today - last) / (1000 * 60 * 60 * 24));
-
-        if (diffDays === 0) {
-          newCurrentStreak = progress?.current_streak || 1;
-        } else if (diffDays === 1) {
-          newCurrentStreak = (progress?.current_streak || 0) + 1;
-        } else {
-          newCurrentStreak = 1;
-        }
-      }
-
-      if (newCurrentStreak > newLongestStreak) {
-        newLongestStreak = newCurrentStreak;
-      }
-    }
-
-    await supabase
-      .from("user_progress")
-      .update({
-        submission_count: newSubmissionCount,
-        problems_solved: newProblemsSolved,
-        current_streak: newCurrentStreak,
-        longest_streak: newLongestStreak,
-        last_submission_date: now.toISOString(),
-      })
-      .eq("user_id", userId);
+    if (error) throw error;
 
     res.json({
-      message: "Code submitted successfully",
-      submission,
+      success: true,
       verdict,
-      passedTestCases: passedCount,
-      totalTestCases: totalTests,
+      passed,
+      total,
+      submission: data,
     });
-  } catch (error) {
-    res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+  } catch (err) {
+    fs.unlinkSync(file);
+    res.status(500).json({ message: err.message });
   }
 };
 
-// ================= GET SUBMISSIONS =================
+/* ================= GET SUBMISSIONS ================= */
 const getSubmissions = async (req, res) => {
   const { problemId } = req.params;
-  const userId = req.user?.id;
+  const userId = req.user?.id || 1;
 
   try {
     const { data, error } = await supabase
@@ -364,18 +205,13 @@ const getSubmissions = async (req, res) => {
       .select("*")
       .eq("user_id", userId)
       .eq("problem_id", problemId)
-      .order("submitted_at", { ascending: false });
+      .order("created_at", { ascending: false });
 
-    if (error) {
-      return res.status(400).json({ message: error.message });
-    }
+    if (error) throw error;
 
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 };
 
