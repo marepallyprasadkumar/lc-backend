@@ -5,11 +5,12 @@ const {
   runCode,
   submitCode,
   getSubmissions,
+  getAiHint,
 } = require("../controllers/codeController");
 
-// 🔥 REMOVE AUTH FOR NOW (fixes 401 + empty submissions)
 router.post("/run", runCode);
 router.post("/submit", submitCode);
+router.post("/hint", getAiHint);
 router.get("/submissions/:problemId", getSubmissions);
 
 module.exports = router;

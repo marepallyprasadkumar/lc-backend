@@ -16,7 +16,6 @@ const LANGUAGE_COMMANDS = {
 const normalize = (v) => String(v || "").trim().replace(/\r\n/g, "\n");
 const compact = (v) => String(v || "").replace(/\s+/g, "").trim();
 
-/* ================= EXECUTE ================= */
 const executeCode = (cmd, file, input) =>
   new Promise((resolve) => {
     const proc = spawn(cmd, [file]);
@@ -46,7 +45,6 @@ const executeCode = (cmd, file, input) =>
     proc.stdin.end();
   });
 
-/* ================= RUN CODE ================= */
 const runCode = async (req, res) => {
   const { code, language = "python", problemId } = req.body;
 
@@ -79,8 +77,7 @@ const runCode = async (req, res) => {
         inputFormatted
       );
 
-      const passed =
-        !r.error && compact(r.output) === compact(t.expected_output);
+      const passed = !r.error && compact(r.output) === compact(t.expected_output);
 
       results.push({
         input: t.input,
@@ -98,8 +95,8 @@ const runCode = async (req, res) => {
     res.json({
       success: true,
       verdict: passedCount === totalCount ? "Accepted" : "Wrong Answer",
-      passed: passedCount,     // ✅ FIX
-      total: totalCount,       // ✅ FIX
+      passed: passedCount,
+      total: totalCount,
       results,
     });
   } catch (err) {
@@ -108,7 +105,6 @@ const runCode = async (req, res) => {
   }
 };
 
-/* ================= SUBMIT CODE ================= */
 const submitCode = async (req, res) => {
   const { code, language = "python", problemId } = req.body;
   const userId = req.user?.id || 1;
@@ -152,8 +148,7 @@ const submitCode = async (req, res) => {
         inputFormatted
       );
 
-      const ok =
-        !r.error && compact(r.output) === compact(t.expected_output);
+      const ok = !r.error && compact(r.output) === compact(t.expected_output);
 
       if (ok) passed++;
     }
@@ -194,7 +189,6 @@ const submitCode = async (req, res) => {
   }
 };
 
-/* ================= GET SUBMISSIONS ================= */
 const getSubmissions = async (req, res) => {
   const { problemId } = req.params;
   const userId = req.user?.id || 1;
@@ -215,8 +209,34 @@ const getSubmissions = async (req, res) => {
   }
 };
 
+const getAiHint = async (req, res) => {
+  const { problemTitle = "", problemDescription = "", code = "" } = req.body || {};
+
+  if (!problemTitle && !problemDescription) {
+    return res.status(400).json({ message: "Problem context is required" });
+  }
+
+  const lowered = `${problemTitle} ${problemDescription}`.toLowerCase();
+  const hasLoop = /for\s*\(|while\s*\(|for\s+\w+\s+in/.test(code);
+
+  let hint = "Break the problem into input, processing, and output. Write a small brute-force solution first, then optimize.";
+
+  if (lowered.includes("two sum")) {
+    hint = "Try using a hash map: store number -> index as you scan the array, and for each number check whether target - number already exists.";
+  } else if (lowered.includes("palindrome")) {
+    hint = "Use two pointers from left and right and move inward while characters match.";
+  } else if (lowered.includes("subarray") || lowered.includes("substring")) {
+    hint = "Consider a sliding window and define the condition that grows/shrinks the window.";
+  } else if (!hasLoop) {
+    hint = "Start with a single pass loop over the main input and print intermediate values to verify your logic.";
+  }
+
+  res.json({ success: true, hint });
+};
+
 module.exports = {
   runCode,
   submitCode,
   getSubmissions,
+  getAiHint,
 };
