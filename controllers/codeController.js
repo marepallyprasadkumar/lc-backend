@@ -112,8 +112,19 @@ const executeByLanguage = async ({ language, code, input }) => {
   }
 };
 
+const toClientTests = (tests = [], sampleOnly = false) =>
+  (Array.isArray(tests) ? tests : [])
+    .filter((t) => t && t.input != null && (t.expected_output != null || t.expected != null))
+    .filter((t) => !sampleOnly || t.is_sample !== false)
+    .map((t, idx) => ({
+      id: `client-test-${idx + 1}`,
+      input: String(t.input),
+      expected_output: String(t.expected_output ?? t.expected),
+      is_sample: t.is_sample !== false,
+    }));
+
 const runCode = async (req, res) => {
-  const { code, language = "python", problemId, examples: clientExamples = [] } = req.body;
+  const { code, language = "python", problemId, examples: clientExamples = [], testCases: clientTestCases = [] } = req.body;
 
   if (!code || !problemId) {
     return res.status(400).json({ success: false, error: "Missing data" });
@@ -149,6 +160,10 @@ const runCode = async (req, res) => {
             is_sample: true,
           }));
       }
+    }
+
+    if (effectiveTests.length === 0) {
+      effectiveTests = toClientTests(clientTestCases, true);
     }
 
     if (effectiveTests.length === 0 && Array.isArray(clientExamples) && clientExamples.length > 0) {
@@ -194,7 +209,7 @@ const runCode = async (req, res) => {
 };
 
 const submitCode = async (req, res) => {
-  const { code, language = "python", problemId } = req.body;
+  const { code, language = "python", problemId, testCases: clientTestCases = [] } = req.body;
   const userId = req.user?.id || 1;
 
   if (!code || !problemId) {
@@ -212,20 +227,22 @@ const submitCode = async (req, res) => {
       .eq("problem_id", problemId)
       .eq("is_sample", false);
 
-    if (!tests || tests.length === 0) {
+    const effectiveTests = tests && tests.length > 0 ? tests : toClientTests(clientTestCases, false);
+
+    if (!effectiveTests || effectiveTests.length === 0) {
       return res.json({ success: true, verdict: "No Tests", passed: 0, total: 0, submission: null });
     }
 
     let passed = 0;
 
-    for (const t of tests) {
+    for (const t of effectiveTests) {
       const inputFormatted = (t.input || "").replace(/\\n/g, "\n");
       const r = await executeByLanguage({ language, code, input: inputFormatted });
       const ok = !r.error && compact(r.output) === compact(t.expected_output);
       if (ok) passed++;
     }
 
-    const total = tests.length;
+    const total = effectiveTests.length;
     const verdict = passed === total ? "Accepted" : "Wrong Answer";
 
     const { data, error } = await supabase
@@ -289,7 +306,13 @@ const getAllSubmissions = async (req, res) => {
 };
 
 const getAiHint = async (req, res) => {
-  const { problemTitle = "", problemDescription = "", code = "", hintLevel = 1 } = req.body || {};
+  const {
+    problemTitle = "",
+    problemDescription = "",
+    code = "",
+    hintLevel = 1,
+    learnerLevel = "beginner",
+  } = req.body || {};
 
   if (!problemTitle && !problemDescription) {
     return res.status(400).json({ message: "Problem context is required" });
@@ -297,42 +320,119 @@ const getAiHint = async (req, res) => {
 
   const lowered = `${problemTitle} ${problemDescription}`.toLowerCase();
   const level = Math.max(1, Math.min(3, Number(hintLevel) || 1));
+  const learner = ["beginner", "intermediate", "advanced"].includes(String(learnerLevel))
+    ? String(learnerLevel)
+    : "beginner";
 
-  const generic = [
-    "Step 1: Read one example input and write what output should come.\nStep 2: Write a simple working solution first (even if slow).\nStep 3: Run and verify with sample tests.",
-    "Debug idea:\n1) Print important variables each loop.\n2) Check where your output becomes different.\n3) Fix one issue at a time and run again.",
-    "Optimization idea:\n1) Find the slow part (usually nested loops).\n2) Replace with map/set, two pointers, or prefix sum.\n3) Re-test to confirm same correct output.",
-  ];
+  const topics = {
+    generic: {
+      concept: "Break the problem into input parsing, core logic, and exact output formatting.",
+      why: "This keeps debugging simple. If output is wrong, you can quickly know whether parsing, algorithm, or printing caused it.",
+      tradeoff: "A direct brute-force solution is useful for learning, but it may fail large hidden tests when the time complexity is high.",
+      advanced: "Identify the invariant first, then choose the simplest data structure that preserves it during one pass.",
+      next: "Run the first sample, compare expected and actual output, then fix one mismatch at a time.",
+    },
+    hashMap: {
+      concept: "Use a hash map to remember values you have already seen.",
+      why: "A hash map gives fast lookup. Instead of checking every pair again and again, you can ask: have I already seen the number I need?",
+      tradeoff: "Nested loops are easier to write but become slow as input grows. A hash map uses extra memory, but it usually reduces O(n^2) work to O(n).",
+      advanced: "Maintain value -> index while scanning once. Check complement before inserting the current value to avoid reusing the same element.",
+      next: "For each number x, compute target - x. If it exists in the map, you found the answer.",
+    },
+    slidingWindow: {
+      concept: "Use a sliding window when the answer is a continuous part of an array or string.",
+      why: "The window lets you expand and shrink a range without rebuilding it from scratch each time.",
+      tradeoff: "Brute force tries many substrings and repeats work. Sliding window is faster, but you must carefully update counts when the left pointer moves.",
+      advanced: "Define the validity condition, expand right until invalid or satisfied, then move left to restore or optimize the window.",
+      next: "Track left, right, and a frequency map or last-seen map. Update the best answer after each valid window.",
+    },
+    stack: {
+      concept: "Use a stack when the latest opened item must be closed first.",
+      why: "Bracket problems follow last-in-first-out order. The most recent opening bracket is the only one that can match the next closing bracket.",
+      tradeoff: "Counting bracket types is not enough because order matters. A stack stores order, but you must handle empty-stack cases.",
+      advanced: "Push opening brackets. For a closing bracket, compare against the expected top; fail immediately on mismatch.",
+      next: "At the end, the stack must be empty. If anything remains, some bracket was never closed.",
+    },
+    dynamicProgramming: {
+      concept: "Use dynamic programming when the answer can be built from smaller answers.",
+      why: "It avoids solving the same subproblem repeatedly. You store what you learned and reuse it.",
+      tradeoff: "Plain recursion is easy to understand but can repeat work or overflow the call stack. DP is faster, but you must define the state clearly.",
+      advanced: "Write the recurrence, choose iteration order, then compress memory when only the previous states are needed.",
+      next: "Ask: what smaller answer do I need to compute the current answer?",
+    },
+    graphSearch: {
+      concept: "Use DFS or BFS to visit connected cells or nodes.",
+      why: "When one cell leads to neighboring cells, traversal marks the entire connected component in one controlled pass.",
+      tradeoff: "DFS is compact but may hit recursion depth on large grids. BFS uses a queue and is often safer for very large input.",
+      advanced: "Each unvisited land cell starts one component. Mark on push/entry so the same cell is not queued twice.",
+      next: "Scan the grid. When you find unvisited land, count one island and mark all reachable land.",
+    },
+    twoPointers: {
+      concept: "Use two pointers when decisions depend on both ends or two moving boundaries.",
+      why: "Two pointers reduce repeated scanning by moving each index only when it can still improve the answer.",
+      tradeoff: "A precomputed array can be simpler, but two pointers often saves memory. The risk is moving the wrong pointer without a reason.",
+      advanced: "Move the pointer at the limiting boundary because the stronger boundary cannot improve the current bottleneck.",
+      next: "Define what each pointer represents, then update the answer before moving the limiting pointer.",
+    },
+  };
 
-  const twoSum = [
-    "Think like this: for each number, what other number is needed to reach target?",
-    "Use a map: number -> index.\nFor current number x, check if (target - x) is already in map.",
-    "Simple steps:\n1) Loop through array.\n2) need = target - nums[i]\n3) If need in map, answer is [map[need], i]\n4) Else store nums[i] in map.",
-  ];
-
-  const slidingWindow = [
-    "Use two pointers: left and right. This creates a moving window.",
-    "Move right pointer forward, update counts. If rule breaks, move left pointer until rule is valid.",
-    "Track best answer on every valid window (max length / min length / max sum based on question).",
-  ];
-
-  const palindrome = [
-    "Palindrome means string reads same from left and right.",
-    "Basic check: compare both ends, move inward while characters match.",
-    "Longest palindrome tip: expand from center for both odd and even centers.",
-  ];
-
-  let bank = generic;
-  if (lowered.includes("two sum")) bank = twoSum;
-  else if (lowered.includes("substring") || lowered.includes("subarray")) bank = slidingWindow;
-  else if (lowered.includes("palindrome")) bank = palindrome;
+  let topic = topics.generic;
+  let topicName = "Problem Solving";
+  if (lowered.includes("two sum")) {
+    topic = topics.hashMap;
+    topicName = "Hash Map";
+  } else if (lowered.includes("substring") || lowered.includes("window")) {
+    topic = topics.slidingWindow;
+    topicName = "Sliding Window";
+  } else if (lowered.includes("parentheses") || lowered.includes("bracket")) {
+    topic = topics.stack;
+    topicName = "Stack";
+  } else if (lowered.includes("stairs") || lowered.includes("subarray") || lowered.includes("dynamic")) {
+    topic = topics.dynamicProgramming;
+    topicName = "Dynamic Programming";
+  } else if (lowered.includes("island") || lowered.includes("grid")) {
+    topic = topics.graphSearch;
+    topicName = "Graph Traversal";
+  } else if (lowered.includes("rain water") || lowered.includes("two pointers")) {
+    topic = topics.twoPointers;
+    topicName = "Two Pointers";
+  }
 
   const codeLines = code.split("\n").filter((l) => l.trim().length > 0).length;
   const adaptiveNudge = codeLines < 3
     ? "Start small: write function skeleton, handle one sample input, print output."
     : "Take one sample test, compare expected vs actual output, and find the first line where it goes wrong.";
 
-  res.json({ success: true, hintLevel: level, hint: bank[level - 1], nextHint: level < 3 ? level + 1 : null, adaptiveNudge });
+  const byLearner = {
+    beginner: [
+      { title: "Concept", body: topic.concept },
+      { title: "Why we use it", body: topic.why },
+      { title: "What can go wrong", body: topic.tradeoff },
+      { title: "Try this next", body: topic.next },
+    ],
+    intermediate: [
+      { title: "Approach", body: topic.why },
+      { title: "Tradeoff", body: topic.tradeoff },
+      { title: "Common mistake", body: "Most wrong answers come from edge cases, pointer updates, or printing in the wrong format. Test the smallest input and one tricky sample." },
+      { title: "Next move", body: topic.next },
+    ],
+    advanced: [
+      { title: "Hint", body: topic.advanced },
+      { title: "Invariant", body: "Keep one clear condition true after every loop iteration. If that condition breaks, fix the update order." },
+      { title: "Edge cases", body: "Check empty or minimum input, duplicate values, all-negative values, and cases where no valid answer exists if the problem allows it." },
+    ],
+  };
+
+  res.json({
+    success: true,
+    hintLevel: level,
+    learnerLevel: learner,
+    topic: topicName,
+    hint: byLearner[learner].map((section) => `${section.title}: ${section.body}`).join("\n\n"),
+    sections: byLearner[learner],
+    nextHint: level < 3 ? level + 1 : 1,
+    adaptiveNudge,
+  });
 };
 
 

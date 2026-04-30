@@ -3,8 +3,6 @@ const supabase = require("../config/supabaseClient");
 /* ================= GET ALL PROBLEMS ================= */
 const getProblems = async (req, res) => {
   try {
-    console.log("API HIT: /api/problems"); // 🔥 DEBUG
-
     const { data, error } = await supabase
       .from("problems")
       .select("*");
@@ -13,8 +11,6 @@ const getProblems = async (req, res) => {
       console.error("Supabase error:", error);
       throw error;
     }
-
-    console.log("DATA:", data); // 🔥 DEBUG
 
     res.json({ data: data || [] });
   } catch (err) {
